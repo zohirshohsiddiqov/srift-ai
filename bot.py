@@ -2,7 +2,10 @@ import logging
 import os
 from threading import Thread
 from flask import Flask
+
+# API Tokenni xavfsiz o'qish
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+
 from quiz import quiz_conv_handler
 from services import (
     check_spelling_and_style,
@@ -25,7 +28,8 @@ from telegram.ext import (
 
 # Logging sozlamalari
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
@@ -80,7 +84,11 @@ def get_main_keyboard() -> InlineKeyboardMarkup:
 def get_back_keyboard() -> InlineKeyboardMarkup:
     """Har bir amaldan so'ng menyuga qaytish tugmasi."""
     keyboard = [
-        [InlineKeyboardButton("🔝 Asosiy Menyuga Qaytish", callback_data="main_menu")]
+        [
+            InlineKeyboardButton(
+                "🔝 Asosiy Menyuga Qaytish", callback_data="main_menu"
+            )
+        ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -115,7 +123,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await send_or_edit_menu(update.callback_query, welcome_text, reply_markup)
     else:
         await update.message.reply_text(
-            welcome_text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN
+            welcome_text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN,
         )
 
 
@@ -180,7 +190,9 @@ async def handle_message(
     mode = context.user_data.get("mode", "convert")
     user_text = update.message.text
 
-    status_msg = await update.message.reply_text("🔄 Tahlil qilinmoqda, kuting...")
+    status_msg = await update.message.reply_text(
+        "🔄 Tahlil qilinmoqda, kuting..."
+    )
 
     try:
         if mode == "check":
@@ -281,6 +293,10 @@ async def handle_document(
 def main() -> None:
     # Render portalida port berish uchun Flask thread'ini yurgazamiz
     Thread(target=run_http_server, daemon=True).start()
+
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error("TELEGRAM_BOT_TOKEN topilmadi! Environment Variable'ni tekshiring.")
+        return
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
