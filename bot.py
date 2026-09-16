@@ -2,7 +2,7 @@ import logging
 import os
 from threading import Thread
 from flask import Flask
-from config import TELEGRAM_BOT_TOKEN
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 from quiz import quiz_conv_handler
 from services import (
     check_spelling_and_style,
