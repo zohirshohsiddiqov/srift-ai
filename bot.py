@@ -1,5 +1,7 @@
 import logging
 import os
+from threading import Thread
+from flask import Flask
 from config import TELEGRAM_BOT_TOKEN
 from quiz import quiz_conv_handler
 from services import (
@@ -21,10 +23,24 @@ from telegram.ext import (
     filters,
 )
 
+# Logging sozlamalari
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# Render Web Service uchun Flask HTTP Server (Keep-Alive)
+app = Flask("")
+
+
+@app.route("/")
+def home():
+    return "Şrift AI Bot Web Service ishlamoqda!"
+
+
+def run_http_server():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
 
 
 def get_main_keyboard() -> InlineKeyboardMarkup:
@@ -76,7 +92,6 @@ async def send_or_edit_menu(query, text: str, reply_markup=None):
             text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN
         )
     except Exception:
-        # Faylli xabarlarda edit_message_text ishlamasa, eski xabarni o'chirib yangisini yuboramiz
         try:
             await query.message.delete()
         except Exception:
@@ -264,6 +279,9 @@ async def handle_document(
 
 
 def main() -> None:
+    # Render portalida port berish uchun Flask thread'ini yurgazamiz
+    Thread(target=run_http_server, daemon=True).start()
+
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
