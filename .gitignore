@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pdf
+input_*
+new_alphabet_*
+config.py
+.env
