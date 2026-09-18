@@ -12,9 +12,11 @@ from database import (
     add_user,
     block_user,
     get_all_active_user_ids,
+    get_required_channel,
     get_stats,
     init_db,
     is_user_blocked,
+    set_required_channel,
     unblock_user,
 )
 from quiz import quiz_conv_handler
@@ -47,7 +49,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Render Web Service uchun Flask HTTP Server (Keep-Alive)
+# Render Web Service uchun Flask HTTP Server
 app = Flask("")
 
 
@@ -61,8 +63,44 @@ def run_http_server():
     app.run(host="0.0.0.0", port=port)
 
 
+async def check_subscription(
+    user_id: int, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    """Foydalanuvchi majburiy kanalga a'zo ekanligini tekshiradi."""
+    required_channel = get_required_channel()
+    if not required_channel or user_id == ADMIN_ID:
+        return True
+    try:
+        member = await context.bot.get_chat_member(
+            chat_id=required_channel, user_id=user_id
+        )
+        return member.status in ["creator", "administrator", "member"]
+    except Exception as e:
+        logger.error(f"Kanal obunasini tekshirishda xatolik: {e}")
+        return True
+
+
+def get_sub_keyboard() -> InlineKeyboardMarkup:
+    """Kanalga obuna bo'lish tugmasi keyboardi."""
+    required_channel = get_required_channel()
+    channel_link = f"https://t.me/{required_channel.replace('@', '')}"
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "📢 Kanalimizga obuna bo'lish", url=channel_link
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "✅ Obunani tekshirish", callback_data="check_sub"
+            )
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    """Asosiy menyu keyboardi (Adminlar uchun alohida tugma bilan)."""
+    """Asosiy menyu keyboardi."""
     keyboard = [
         [
             InlineKeyboardButton(
@@ -107,6 +145,7 @@ def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 def get_admin_keyboard() -> InlineKeyboardMarkup:
     """Admin menyu tugmalari."""
+    current_channel = get_required_channel() or "Sozlanmagan (O'chirilgan)"
     keyboard = [
         [
             InlineKeyboardButton(
@@ -116,6 +155,12 @@ def get_admin_keyboard() -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(
                 "📢 Ommaviy Xabar Yuborish", callback_data="admin_broadcast"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📢 Majburiy Kanalni Sozlash",
+                callback_data="admin_set_channel_prompt",
             )
         ],
         [
@@ -136,7 +181,7 @@ def get_admin_keyboard() -> InlineKeyboardMarkup:
 
 
 def get_back_keyboard() -> InlineKeyboardMarkup:
-    """Har bir amaldan so'ng menyuga qaytish tugmasi."""
+    """Menyuga qaytish tugmasi."""
     keyboard = [
         [
             InlineKeyboardButton(
@@ -148,7 +193,6 @@ def get_back_keyboard() -> InlineKeyboardMarkup:
 
 
 async def send_or_edit_menu(query, text: str, reply_markup=None):
-    """Xabarni tahrirlaydi yoki yangidan yuboradi."""
     try:
         await query.edit_message_text(
             text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN
@@ -166,13 +210,33 @@ async def send_or_edit_menu(query, text: str, reply_markup=None):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
 
-    # Bazaga foydalanuvchini qo'shish
     add_user(user.id, user.full_name, user.username or "")
 
     if is_user_blocked(user.id):
         await update.message.reply_text(
             "⛔️ Siz botdan foydalanishdan bloklangansiz."
         )
+        return
+
+    # Majburiy obunani tekshirish
+    is_subbed = await check_subscription(user.id, context)
+    if not is_subbed:
+        req_chan = get_required_channel()
+        sub_text = (
+            f"⚠️ **Botdan foydalanish uchun rasmiy kanalimizga obuna bo'ling!**\n\n"
+            f"Kanalimiz: {req_chan}\n\n"
+            "Obuna bo'lgach, **'✅ Obunani tekshirish'** tugmasini bosing."
+        )
+        if update.callback_query:
+            await send_or_edit_menu(
+                update.callback_query, sub_text, get_sub_keyboard()
+            )
+        else:
+            await update.message.reply_text(
+                sub_text,
+                reply_markup=get_sub_keyboard(),
+                parse_mode=ParseMode.MARKDOWN,
+            )
         return
 
     welcome_text = (
@@ -206,6 +270,35 @@ async def button_handler(
         )
         return
 
+    if query.data == "check_sub":
+        if await check_subscription(user.id, context):
+            await query.answer(
+                "✅ Rahmat! Obuna tasdiqlandi.", show_alert=True
+            )
+            welcome_text = (
+                f"Assalomu alaykum, **{user.first_name}**!\n\n"
+                "🇺🇿 **“Jonajon o‘zbek tilim”** tanlovi doirasida yaratilgan **Yangi Alifbo va Imlo Ekotizimiga** xush kelibsiz!\n\n"
+                "Quyidagi imkoniyatlardan birini tanlang:"
+            )
+            await send_or_edit_menu(
+                query, welcome_text, get_main_keyboard(user.id)
+            )
+        else:
+            await query.answer(
+                "❌ Siz hali kanalga obuna bo'lmadingiz!", show_alert=True
+            )
+        return
+
+    if not await check_subscription(user.id, context):
+        req_chan = get_required_channel()
+        sub_text = (
+            f"⚠️ **Botdan foydalanish uchun rasmiy kanalimizga obuna bo'ling!**\n\n"
+            f"Kanalimiz: {req_chan}\n\n"
+            "Obuna bo'lgach, **'✅ Obunani tekshirish'** tugmasini bosing."
+        )
+        await send_or_edit_menu(query, sub_text, get_sub_keyboard())
+        return
+
     if query.data != "admin_broadcast" and not query.data.startswith("admin_"):
         context.user_data.pop("admin_action", None)
 
@@ -216,7 +309,12 @@ async def button_handler(
         await send_or_edit_menu(query, welcome_text, get_main_keyboard(user.id))
 
     elif query.data == "admin_panel" and user.id == ADMIN_ID:
-        admin_text = "⚙️ **Admin Panel**\n\nQuyidagi amallardan birini tanlang:"
+        current_chan = get_required_channel() or "O'chirilgan"
+        admin_text = (
+            f"⚙️ **Admin Panel**\n\n"
+            f"📢 Joriy majburiy kanal: `{current_chan}`\n\n"
+            "Quyidagi amallardan birini tanlang:"
+        )
         await send_or_edit_menu(query, admin_text, get_admin_keyboard())
 
     elif query.data == "admin_stats" and user.id == ADMIN_ID:
@@ -234,6 +332,18 @@ async def button_handler(
         await send_or_edit_menu(
             query,
             "📢 **Ommaviy xabar yuborish rejimi:**\n\nBarcha foydalanuvchilarga yubormoqchi bo'lgan matningizni yuboring:",
+            get_admin_keyboard(),
+        )
+
+    elif query.data == "admin_set_channel_prompt" and user.id == ADMIN_ID:
+        context.user_data["admin_action"] = "set_channel"
+        current_chan = get_required_channel() or "O'chirilgan"
+        await send_or_edit_menu(
+            query,
+            f"📢 **Majburiy kanalni sozlash:**\n\n"
+            f"Hozirgi kanal: `{current_chan}`\n\n"
+            "Yangi kanal username'ini kiriting (masalan: `@srift_uz`):\n"
+            "*(Majburiy obunani o'chirish uchun `off` deb yuboring)*",
             get_admin_keyboard(),
         )
 
@@ -311,9 +421,29 @@ async def handle_message(
 
     # ADMIN AMALLARI
     if user.id == ADMIN_ID and admin_action:
-        text = update.message.text
+        text = update.message.text.strip()
 
-        if admin_action == "broadcast":
+        if admin_action == "set_channel":
+            context.user_data.pop("admin_action", None)
+            if text.lower() == "off":
+                set_required_channel("")
+                await update.message.reply_text(
+                    "✅ Majburiy obuna muvaffaqiyatli o'chirildi!",
+                    reply_markup=get_admin_keyboard(),
+                )
+            else:
+                if not text.startswith("@"):
+                    text = "@" + text
+                set_required_channel(text)
+                await update.message.reply_text(
+                    f"✅ Majburiy kanal `{text}` ga o'zgartirildi!\n\n"
+                    "⚠️ *Eslatma:* Botingiz shu kanalda ADMIN bo'lishi kerak.",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=get_admin_keyboard(),
+                )
+            return
+
+        elif admin_action == "broadcast":
             context.user_data.pop("admin_action", None)
             active_ids = get_all_active_user_ids()
             success, failed = 0, 0
@@ -375,7 +505,21 @@ async def handle_message(
                     )
             return
 
-    # ODDIY FOYDALANUVCHI AMALLARI
+    # Obunani tekshirish (Oddiy foydalanuvchilar uchun)
+    if not await check_subscription(user.id, context):
+        req_chan = get_required_channel()
+        sub_text = (
+            f"⚠️ **Botdan foydalanish uchun rasmiy kanalimizga obuna bo'ling!**\n\n"
+            f"Kanalimiz: {req_chan}\n\n"
+            "Obuna bo'lgach, **'✅ Obunani tekshirish'** tugmasini bosing."
+        )
+        await update.message.reply_text(
+            sub_text,
+            reply_markup=get_sub_keyboard(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
     mode = context.user_data.get("mode", "convert")
     user_text = update.message.text
 
@@ -416,6 +560,20 @@ async def handle_document(
     if is_user_blocked(user.id):
         await update.message.reply_text(
             "⛔️ Siz botdan foydalanishdan bloklangansiz."
+        )
+        return
+
+    if not await check_subscription(user.id, context):
+        req_chan = get_required_channel()
+        sub_text = (
+            f"⚠️ **Botdan foydalanish uchun rasmiy kanalimizga obuna bo'ling!**\n\n"
+            f"Kanalimiz: {req_chan}\n\n"
+            "Obuna bo'lgach, **'✅ Obunani tekshirish'** tugmasini bosing."
+        )
+        await update.message.reply_text(
+            sub_text,
+            reply_markup=get_sub_keyboard(),
+            parse_mode=ParseMode.MARKDOWN,
         )
         return
 
@@ -486,7 +644,6 @@ async def handle_document(
 
 
 def main() -> None:
-    # Render porti uchun Flask server
     Thread(target=run_http_server, daemon=True).start()
 
     if not TELEGRAM_BOT_TOKEN:
@@ -502,7 +659,7 @@ def main() -> None:
     application.add_handler(
         CallbackQueryHandler(
             button_handler,
-            pattern="^(main_menu|admin_panel|admin_stats|admin_broadcast|admin_block_prompt|admin_unblock_prompt|mode_convert|mode_check|mode_docs|generate_poster)$",
+            pattern="^(main_menu|check_sub|admin_panel|admin_stats|admin_broadcast|admin_set_channel_prompt|admin_block_prompt|admin_unblock_prompt|mode_convert|mode_check|mode_docs|generate_poster)$",
         )
     )
 
@@ -511,7 +668,7 @@ def main() -> None:
     )
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-    logger.info("Bot Admin Panel bilan ishga tushdi...")
+    logger.info("Bot Majburiy Obuna Dynamic Sozlamasi bilan ishga tushdi...")
     application.run_polling()
 
 
