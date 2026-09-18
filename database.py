@@ -19,6 +19,16 @@ def init_db():
     """
     )
 
+    # Sozlamalar jadvali (Kanal username'ini saqlash uchun)
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """
+    )
+
     conn.commit()
     conn.close()
 
@@ -95,3 +105,30 @@ def get_all_active_user_ids():
     rows = cursor.fetchall()
     conn.close()
     return [row[0] for row in rows]
+
+
+# KANAL SOZLAMALARI UCHUN FUNKSIYALAR
+def set_required_channel(channel_username: str):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO settings (key, value)
+        VALUES ('required_channel', ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+    """,
+        (channel_username,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_required_channel() -> str:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT value FROM settings WHERE key = 'required_channel'"
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else ""
