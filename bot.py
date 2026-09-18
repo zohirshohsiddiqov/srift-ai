@@ -2,7 +2,21 @@ import logging
 import os
 from threading import Thread
 from flask import Flask
+
+# Environment o'zgaruvchilari
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
+
+# Baza bilan ishlash funksiyalari
+from database import (
+    add_user,
+    block_user,
+    get_all_active_user_ids,
+    get_stats,
+    init_db,
+    is_user_blocked,
+    unblock_user,
+)
 from quiz import quiz_conv_handler
 from services import (
     check_spelling_and_style,
@@ -23,9 +37,13 @@ from telegram.ext import (
     filters,
 )
 
+# Ma'lumotlar bazasini ishga tushirish
+init_db()
+
 # Logging sozlamalari
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
@@ -43,8 +61,8 @@ def run_http_server():
     app.run(host="0.0.0.0", port=port)
 
 
-def get_main_keyboard() -> InlineKeyboardMarkup:
-    """Asosiy menyu tugmalari keyboardi."""
+def get_main_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Asosiy menyu keyboardi (Adminlar uchun alohida tugma bilan)."""
     keyboard = [
         [
             InlineKeyboardButton(
@@ -74,19 +92,63 @@ def get_main_keyboard() -> InlineKeyboardMarkup:
             )
         ],
     ]
+
+    if user_id == ADMIN_ID:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "⚙️ Admin Panel", callback_data="admin_panel"
+                )
+            ]
+        )
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_admin_keyboard() -> InlineKeyboardMarkup:
+    """Admin menyu tugmalari."""
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "📊 Bot Statistikasi", callback_data="admin_stats"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📢 Ommaviy Xabar Yuborish", callback_data="admin_broadcast"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🚫 Bloklash", callback_data="admin_block_prompt"
+            ),
+            InlineKeyboardButton(
+                "✅ Blokdan chiqarish", callback_data="admin_unblock_prompt"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "🔝 Asosiy Menyuga Qaytish", callback_data="main_menu"
+            )
+        ],
+    ]
     return InlineKeyboardMarkup(keyboard)
 
 
 def get_back_keyboard() -> InlineKeyboardMarkup:
     """Har bir amaldan so'ng menyuga qaytish tugmasi."""
     keyboard = [
-        [InlineKeyboardButton("🔝 Asosiy Menyuga Qaytish", callback_data="main_menu")]
+        [
+            InlineKeyboardButton(
+                "🔝 Asosiy Menyuga Qaytish", callback_data="main_menu"
+            )
+        ]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
 async def send_or_edit_menu(query, text: str, reply_markup=None):
-    """Xabarni tahrirlaydi, agar u fayl xabari bo'lsa yangitdan yuboradi."""
+    """Xabarni tahrirlaydi yoki yangidan yuboradi."""
     try:
         await query.edit_message_text(
             text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN
@@ -103,19 +165,31 @@ async def send_or_edit_menu(query, text: str, reply_markup=None):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
+
+    # Bazaga foydalanuvchini qo'shish
+    add_user(user.id, user.full_name, user.username or "")
+
+    if is_user_blocked(user.id):
+        await update.message.reply_text(
+            "⛔️ Siz botdan foydalanishdan bloklangansiz."
+        )
+        return
+
     welcome_text = (
         f"Assalomu alaykum, **{user.first_name}**!\n\n"
         "🇺🇿 **“Jonajon o‘zbek tilim”** tanlovi doirasida yaratilgan **Yangi Alifbo va Imlo Ekotizimiga** xush kelibsiz!\n\n"
         "Quyidagi imkoniyatlardan birini tanlang:"
     )
 
-    reply_markup = get_main_keyboard()
+    reply_markup = get_main_keyboard(user.id)
 
     if update.callback_query:
         await send_or_edit_menu(update.callback_query, welcome_text, reply_markup)
     else:
         await update.message.reply_text(
-            welcome_text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN
+            welcome_text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.MARKDOWN,
         )
 
 
@@ -123,13 +197,61 @@ async def button_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     query = update.callback_query
+    user = query.from_user
     await query.answer()
+
+    if is_user_blocked(user.id):
+        await query.message.reply_text(
+            "⛔️ Siz botdan foydalanishdan bloklangansiz."
+        )
+        return
+
+    if query.data != "admin_broadcast" and not query.data.startswith("admin_"):
+        context.user_data.pop("admin_action", None)
 
     if query.data == "main_menu":
         welcome_text = (
             "🇺🇿 **Asosiy Menyu**\n\nQuyidagi imkoniyatlardan birini tanlang:"
         )
-        await send_or_edit_menu(query, welcome_text, get_main_keyboard())
+        await send_or_edit_menu(query, welcome_text, get_main_keyboard(user.id))
+
+    elif query.data == "admin_panel" and user.id == ADMIN_ID:
+        admin_text = "⚙️ **Admin Panel**\n\nQuyidagi amallardan birini tanlang:"
+        await send_or_edit_menu(query, admin_text, get_admin_keyboard())
+
+    elif query.data == "admin_stats" and user.id == ADMIN_ID:
+        total, blocked = get_stats()
+        stats_text = (
+            "📊 **Bot Statistikasi:**\n\n"
+            f"👥 Jami foydalanuvchilar: `{total}` ta\n"
+            f"🟢 Faol foydalanuvchilar: `{total - blocked}` ta\n"
+            f"🚫 Bloklanganlar: `{blocked}` ta"
+        )
+        await send_or_edit_menu(query, stats_text, get_admin_keyboard())
+
+    elif query.data == "admin_broadcast" and user.id == ADMIN_ID:
+        context.user_data["admin_action"] = "broadcast"
+        await send_or_edit_menu(
+            query,
+            "📢 **Ommaviy xabar yuborish rejimi:**\n\nBarcha foydalanuvchilarga yubormoqchi bo'lgan matningizni yuboring:",
+            get_admin_keyboard(),
+        )
+
+    elif query.data == "admin_block_prompt" and user.id == ADMIN_ID:
+        context.user_data["admin_action"] = "block_user"
+        await send_or_edit_menu(
+            query,
+            "🚫 **Foydalanuvchini bloklash:**\n\nBloklamoqchi bo'lgan foydalanuvchining Telegram ID raqamini yuboring:",
+            get_admin_keyboard(),
+        )
+
+    elif query.data == "admin_unblock_prompt" and user.id == ADMIN_ID:
+        context.user_data["admin_action"] = "unblock_user"
+        await send_or_edit_menu(
+            query,
+            "✅ **Blokdan chiqarish:**\n\nBlokdan chiqarmoqchi bo'lgan foydalanuvchining Telegram ID raqamini yuboring:",
+            get_admin_keyboard(),
+        )
 
     elif query.data == "mode_convert":
         context.user_data["mode"] = "convert"
@@ -177,6 +299,83 @@ async def button_handler(
 async def handle_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
+    user = update.effective_user
+
+    if is_user_blocked(user.id):
+        await update.message.reply_text(
+            "⛔️ Siz botdan foydalanishdan bloklangansiz."
+        )
+        return
+
+    admin_action = context.user_data.get("admin_action")
+
+    # ADMIN AMALLARI
+    if user.id == ADMIN_ID and admin_action:
+        text = update.message.text
+
+        if admin_action == "broadcast":
+            context.user_data.pop("admin_action", None)
+            active_ids = get_all_active_user_ids()
+            success, failed = 0, 0
+
+            status_msg = await update.message.reply_text(
+                "🚀 Xabar barcha foydalanuvchilarga yuborilmoqda..."
+            )
+
+            for uid in active_ids:
+                try:
+                    await context.bot.send_message(
+                        chat_id=uid,
+                        text=f"📢 **E'lon:**\n\n{text}",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                    success += 1
+                except Exception:
+                    failed += 1
+
+            await status_msg.edit_text(
+                f"✅ **Ommaviy xabar yuborildi!**\n\n"
+                f"📥 Muvaffaqiyatli: `{success}` ta\n"
+                f"❌ Yuborilmadi: `{failed}` ta",
+                reply_markup=get_admin_keyboard(),
+            )
+            return
+
+        elif admin_action in ["block_user", "unblock_user"]:
+            context.user_data.pop("admin_action", None)
+            if not text.isdigit():
+                await update.message.reply_text(
+                    "⚠️ Iltimos, faqat raqamli Telegram ID yuboring.",
+                    reply_markup=get_admin_keyboard(),
+                )
+                return
+
+            target_id = int(text)
+            if admin_action == "block_user":
+                if block_user(target_id):
+                    await update.message.reply_text(
+                        f"🚫 ID: `{target_id}` muvaffaqiyatli bloklandi.",
+                        reply_markup=get_admin_keyboard(),
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"⚠️ ID: `{target_id}` bazada topilmadi.",
+                        reply_markup=get_admin_keyboard(),
+                    )
+            else:
+                if unblock_user(target_id):
+                    await update.message.reply_text(
+                        f"✅ ID: `{target_id}` blokdan chiqarildi.",
+                        reply_markup=get_admin_keyboard(),
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"⚠️ ID: `{target_id}` bazada topilmadi.",
+                        reply_markup=get_admin_keyboard(),
+                    )
+            return
+
+    # ODDIY FOYDALANUVCHI AMALLARI
     mode = context.user_data.get("mode", "convert")
     user_text = update.message.text
 
@@ -212,6 +411,14 @@ async def handle_message(
 async def handle_document(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
+    user = update.effective_user
+
+    if is_user_blocked(user.id):
+        await update.message.reply_text(
+            "⛔️ Siz botdan foydalanishdan bloklangansiz."
+        )
+        return
+
     document = update.message.document
     file_name = document.file_name.lower()
 
@@ -279,8 +486,14 @@ async def handle_document(
 
 
 def main() -> None:
-    # Render portalida port berish uchun Flask thread'ini yurgazamiz
+    # Render porti uchun Flask server
     Thread(target=run_http_server, daemon=True).start()
+
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error(
+            "TELEGRAM_BOT_TOKEN topilmadi! Environment Variable'ni tekshiring."
+        )
+        return
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -289,7 +502,7 @@ def main() -> None:
     application.add_handler(
         CallbackQueryHandler(
             button_handler,
-            pattern="^(main_menu|mode_convert|mode_check|mode_docs|generate_poster)$",
+            pattern="^(main_menu|admin_panel|admin_stats|admin_broadcast|admin_block_prompt|admin_unblock_prompt|mode_convert|mode_check|mode_docs|generate_poster)$",
         )
     )
 
@@ -298,7 +511,7 @@ def main() -> None:
     )
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
 
-    logger.info("Bot ishga tushdi...")
+    logger.info("Bot Admin Panel bilan ishga tushdi...")
     application.run_polling()
 
 
